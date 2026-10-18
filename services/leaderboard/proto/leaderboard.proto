@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package leaderboard;
+
+option go_package = "event_horizon/services/leaderboard/proto;leaderboard";
+
+import "validate/validate.proto";
+
+service LeaderboardService {
+    rpc GetTopScores(GetTopScoresRequest) returns (GetTopScoresResponse);
+    rpc GetPlayerRank(GetPlayerRankRequest) returns (GetPlayerRankResponse);
+    rpc UpdateScore(UpdateScoreRequest) returns (UpdateScoreResponse);
+}
+
+message GetTopScoresRequest {
+    string game_id = 1 [(validate.rules).string = {min_len: 1, max_len: 32}];
+    int32 limit = 2 [(validate.rules).int32 = {gte: 0, lte: 100}];
+    int32 level = 3 [(validate.rules).int32 = {gte: 0, lte: 100}];
+}
+
+message GetTopScoresResponse {
+    repeated ScoreEntry entries = 1;
+}
+
+message GetPlayerRankRequest {
+    string game_id = 1 [(validate.rules).string = {min_len: 1, max_len: 32}];
+    string user_id = 2 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    int32 level = 3 [(validate.rules).int32 = {gte: 0, lte: 100}];
+}
+
+message GetPlayerRankResponse {
+    int32 rank = 1;
+    int32 score = 2;
+}
+
+message UpdateScoreRequest {
+    string game_id = 1 [(validate.rules).string = {min_len: 1, max_len: 32}];
+    string user_id = 2 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    string user_email = 3 [(validate.rules).string = {max_len: 254}];
+    string nickname = 4 [(validate.rules).string = {max_len: 64}];
+    int32 score = 5 [(validate.rules).int32 = {gte: 0, lte: 100000}];
+    int32 level = 6 [(validate.rules).int32 = {gte: 0, lte: 100}];
+}
+
+message UpdateScoreResponse {
+    bool success = 1;
+    int32 new_rank = 2;
+    string message = 3;
+}
+
+message ScoreEntry {
+    int32 rank = 1;
+    string user_id = 2;
+    string user_email = 3;
+    string nickname = 4;
+    int32 score = 5;
+    int64 updated_at = 6;
+    int32 level = 7;
+}

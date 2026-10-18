@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package authors;
+
+option go_package = "github.com/s1ntezc0der/event-horizon-backend/services/authors/proto;authors";
+
+// AuthorsService — author public profiles + Wave 3 applications.
+// Inventory stocking stays on Inventory gRPC (RequireRole author); this service is the catalog.
+service AuthorsService {
+  rpc UpsertProfile(UpsertProfileRequest) returns (UpsertProfileResponse);
+  rpc GetAuthor(GetAuthorRequest) returns (GetAuthorResponse);
+  rpc ListAuthors(ListAuthorsRequest) returns (ListAuthorsResponse);
+
+  // Wave 3 C1 — author application.
+  rpc SubmitApplication(SubmitApplicationRequest) returns (SubmitApplicationResponse);
+  rpc GetMyApplication(GetMyApplicationRequest) returns (GetMyApplicationResponse);
+
+  // Wave 3 C2 — admin approval.
+  rpc ListApplications(ListApplicationsRequest) returns (ListApplicationsResponse);
+  rpc ApproveApplication(ApproveApplicationRequest) returns (ApproveApplicationResponse);
+  rpc RejectApplication(RejectApplicationRequest) returns (RejectApplicationResponse);
+  // Compensating call if Auth.UpdateRole fails after approve.
+  rpc RevertApplication(RevertApplicationRequest) returns (RevertApplicationResponse);
+}
+
+message Author {
+  string id = 1;
+  string user_id = 2;
+  string display_name = 3;
+  string bio = 4;
+  string avatar_url = 5;
+  bool active = 6;
+  int64 created_at_unix = 7;
+  int64 updated_at_unix = 8;
+  string portfolio = 9;
+  int64 verified_at_unix = 10;
+}
+
+message UpsertProfileRequest {
+  string user_id = 1;
+  string display_name = 2;
+  string bio = 3;
+  string avatar_url = 4;
+  string portfolio = 5;
+}
+
+message UpsertProfileResponse {
+  Author author = 1;
+}
+
+message GetAuthorRequest {
+  string user_id = 1;
+}
+
+message GetAuthorResponse {
+  Author author = 1;
+}
+
+message ListAuthorsRequest {
+  int32 limit = 1;
+  int32 offset = 2;
+}
+
+message ListAuthorsResponse {
+  repeated Author authors = 1;
+  int64 total = 2;
+}
+
+message AuthorApplication {
+  string id = 1;
+  string user_id = 2;
+  string status = 3; // pending | approved | rejected
+  string display_name = 4;
+  string portfolio = 5;
+  string motivation = 6;
+  string contact_email = 7;
+  int64 created_at_unix = 8;
+  int64 reviewed_at_unix = 9;
+  string reviewed_by = 10;
+  string reviewer_note = 11;
+}
+
+message SubmitApplicationRequest {
+  string user_id = 1;
+  string caller_role = 2;
+  string display_name = 3;
+  string portfolio = 4;
+  string motivation = 5;
+  string contact_email = 6;
+}
+
+message SubmitApplicationResponse {
+  AuthorApplication application = 1;
+}
+
+message GetMyApplicationRequest {
+  string user_id = 1;
+}
+
+message GetMyApplicationResponse {
+  AuthorApplication application = 1;
+}
+
+message ListApplicationsRequest {
+  string status = 1; // pending|approved|rejected|"" (all)
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message ListApplicationsResponse {
+  repeated AuthorApplication applications = 1;
+  int64 total = 2;
+}
+
+message ApproveApplicationRequest {
+  string application_id = 1;
+  string reviewer_id = 2;
+}
+
+message ApproveApplicationResponse {
+  AuthorApplication application = 1;
+  Author author = 2;
+}
+
+message RejectApplicationRequest {
+  string application_id = 1;
+  string reviewer_id = 2;
+  string reviewer_note = 3;
+}
+
+message RejectApplicationResponse {
+  AuthorApplication application = 1;
+}
+
+message RevertApplicationRequest {
+  string application_id = 1;
+}
+
+message RevertApplicationResponse {
+  AuthorApplication application = 1;
+}

@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package billing;
+
+option go_package = "event_horizon/services/billing/proto;billing";
+
+import "validate/validate.proto";
+
+service BillingService {
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+    rpc GetAllBalances(GetAllBalancesRequest) returns (GetAllBalancesResponse);
+    rpc AddCurrency(AddCurrencyRequest) returns (AddCurrencyResponse);
+    rpc SpendCurrency(SpendCurrencyRequest) returns (SpendCurrencyResponse);
+    rpc GetTransactionHistory(GetTransactionHistoryRequest) returns (GetTransactionHistoryResponse);
+}
+
+enum CurrencyType {
+    CURRENCY_UNSPECIFIED = 0;
+    LAMPS = 1;
+    TICKETS = 2;
+}
+
+message GetBalanceRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    CurrencyType currency = 2 [(validate.rules).enum = {defined_only: true}];
+}
+
+message GetBalanceResponse {
+    string user_id = 1;
+    CurrencyType currency = 2;
+    int32 balance = 3;
+    int64 updated_at = 4;
+}
+
+message GetAllBalancesRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message GetAllBalancesResponse {
+    string user_id = 1;
+    repeated BalanceEntry balances = 2;
+}
+
+message BalanceEntry {
+    CurrencyType currency = 1;
+    int32 balance = 2;
+    int64 updated_at = 3;
+}
+
+message AddCurrencyRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    CurrencyType currency = 2 [(validate.rules).enum = {defined_only: true}];
+    int32 amount = 3 [(validate.rules).int32 = {gt: 0}];
+    string reason = 4 [(validate.rules).string = {max_len: 64}];
+    string reference_id = 5 [(validate.rules).string = {max_len: 128}];
+}
+
+message AddCurrencyResponse {
+    bool success = 1;
+    int32 new_balance = 2;
+    string message = 3;
+}
+
+message SpendCurrencyRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    CurrencyType currency = 2 [(validate.rules).enum = {defined_only: true}];
+    int32 amount = 3 [(validate.rules).int32 = {gt: 0}];
+    string reason = 4 [(validate.rules).string = {max_len: 64}];
+    string reference_id = 5 [(validate.rules).string = {max_len: 128}];
+    bool check_only = 6;
+}
+
+message SpendCurrencyResponse {
+    bool success = 1;
+    int32 new_balance = 2;
+    string message = 3;
+}
+
+message GetTransactionHistoryRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    CurrencyType currency = 2;
+    int32 limit = 3 [(validate.rules).int32 = {gte: 0, lte: 100}];
+    int32 offset = 4 [(validate.rules).int32 = {gte: 0}];
+}
+
+message GetTransactionHistoryResponse {
+    repeated Transaction transactions = 1;
+    int32 total = 2;
+}
+
+message Transaction {
+    string id = 1;
+    string user_id = 2;
+    CurrencyType currency = 3;
+    int32 amount = 4;
+    int32 balance_after = 5;
+    string reason = 6;
+    string reference_id = 7;
+    int64 created_at = 8;
+}

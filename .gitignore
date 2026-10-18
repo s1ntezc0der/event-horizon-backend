@@ -1,0 +1,73 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Local override: GOWORK=off
+
+# Task / tool binaries
+bin/
+services/auth/auth-service
+services/billing/billing-service
+services/game/game-service
+services/gateway/gateway-service
+services/leaderboard/leaderboard-service
+services/profile/profile-service
+services/shop/shop-service
+
+# env file
+.env
+scripts/.env.seed.admin
+scripts/.env.seed.author
+scripts/.env.seed.user
+.env.seed*
+.env.local
+frontend/.env.local
+
+# Editor/IDE
+.idea/
+# .vscode/
+
+.git.backup/services/*/*-service
+services/*/*-service-*
+.git.backup/
+.gomodcache/
+
+# Local-only notes — never commit (repo-root folder, no leading dot)
+services/*/*-service
+!services/*/*-service/
+
+# Local Cursor / agent tooling
+.agents/
+skills-lock.json
+
+# Gateway local uploads (inventory images)
+# Compose uses named volume `gateway_uploads` (never in the repo).
+# These paths cover local/dev runs with UPLOAD_DIR=./data/uploads.
+data/uploads/
+**/data/uploads/
+services/gateway/data/
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
+*$py.class
+node_modules/
+node_modules/

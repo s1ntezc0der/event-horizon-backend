@@ -1,0 +1,391 @@
+package app
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	_ "github.com/lib/pq"
+	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/reflection"
+
+	"github.com/s1ntezc0der/event-horizon-backend/contracts/events"
+	"github.com/s1ntezc0der/event-horizon-backend/pkg/migrator"
+	"github.com/s1ntezc0der/event-horizon-backend/platform/pkg/closer"
+	"github.com/s1ntezc0der/event-horizon-backend/platform/pkg/kafka"
+	"github.com/s1ntezc0der/event-horizon-backend/platform/pkg/logger"
+	"github.com/s1ntezc0der/event-horizon-backend/platform/pkg/metrics"
+	"github.com/s1ntezc0der/event-horizon-backend/platform/pkg/tracing"
+	billingPb "github.com/s1ntezc0der/event-horizon-backend/services/billing/proto"
+	paymentPb "github.com/s1ntezc0der/event-horizon-backend/services/payment/proto"
+	"github.com/s1ntezc0der/event-horizon-backend/services/shop/internal/config"
+	"github.com/s1ntezc0der/event-horizon-backend/services/shop/internal/handler"
+	"github.com/s1ntezc0der/event-horizon-backend/services/shop/internal/interceptor"
+	"github.com/s1ntezc0der/event-horizon-backend/services/shop/internal/repository"
+	"github.com/s1ntezc0der/event-horizon-backend/services/shop/internal/service"
+	"github.com/s1ntezc0der/event-horizon-backend/services/shop/internal/worker"
+	"github.com/s1ntezc0der/event-horizon-backend/services/shop/migrations"
+	pb "github.com/s1ntezc0der/event-horizon-backend/services/shop/proto"
+)
+
+type diContainer struct {
+	cfg config.ConfigProvider
+
+	db        *sql.DB
+	redisRepo *repository.RedisShopRepo
+	nc        *nats.Conn
+	js        nats.JetStreamContext
+	pgRepo    *repository.PostgresShopRepo
+	billing   billingPb.BillingServiceClient
+	svc       service.ShopService
+	api       pb.ShopServiceServer
+	kafkaProd kafka.Producer
+}
+
+func newDiContainer(cfg config.ConfigProvider) *diContainer {
+	return &diContainer{cfg: cfg}
+}
+
+func (a *App) init(ctx context.Context) error {
+	steps := []func(context.Context) error{
+		a.initLogger,
+		a.initCloser,
+		a.initTracer,
+		a.initPostgres,
+		a.initRedis,
+		a.initNATS,
+		a.initKafka,
+		a.initDomain,
+		a.initOutbox,
+		a.initGRPC,
+		a.initMetricsHTTP,
+	}
+	for _, step := range steps {
+		if err := step(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) initLogger(_ context.Context) error {
+	lc := a.cfg.LoggerConfig()
+	a.log = logger.NewFrom(lc.Level(), lc.Format())
+	return nil
+}
+
+func (a *App) initCloser(_ context.Context) error {
+	a.closer = closer.New(a.log)
+	return nil
+}
+
+func (a *App) initTracer(ctx context.Context) error {
+	endpoint := getenv("JAEGER_ENDPOINT", "localhost:4317")
+	shutdown, err := tracing.Init(ctx, tracing.Config{
+		ServiceName: "shop",
+		Endpoint:    endpoint,
+		Environment: getenv("ENVIRONMENT", "development"),
+		Insecure:    true,
+	})
+	if err != nil {
+		a.log.Warn("tracer init failed; continuing without OTLP", "err", err)
+		return nil
+	}
+	a.closer.AddNamed("otel tracer", shutdown)
+	return nil
+}
+
+func (a *App) initPostgres(_ context.Context) error {
+	db, err := sql.Open("postgres", a.cfg.PostgresConfig().DSN())
+	if err != nil {
+		return fmt.Errorf("postgres open: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("postgres ping: %w", err)
+	}
+	if err := migrator.Up(db, migrations.FS); err != nil {
+		_ = db.Close()
+		return fmt.Errorf("migrations: %w", err)
+	}
+
+	a.di.db = db
+	a.closer.AddNamed("postgres", func(context.Context) error {
+		return db.Close()
+	})
+	a.log.Info("postgres ready, migrations applied")
+	return nil
+}
+
+func (a *App) initRedis(_ context.Context) error {
+	rc := a.cfg.RedisConfig()
+	a.di.redisRepo = repository.NewRedisShopRepo(rc.Addr(), rc.DB())
+	a.log.Info("redis repo ready", "addr", rc.Addr(), "db", rc.DB())
+	return nil
+}
+
+func (a *App) initNATS(_ context.Context) error {
+	url := a.cfg.NATSConfig().URL()
+	var nc *nats.Conn
+	var err error
+	for i := 0; i < 30; i++ {
+		nc, err = nats.Connect(url)
+		if err == nil {
+			break
+		}
+		a.log.Warn("nats connection attempt failed", "attempt", i+1, "of", 30, "err", err)
+		time.Sleep(1 * time.Second)
+	}
+	if err != nil {
+		return fmt.Errorf("nats connect after 30 attempts: %w", err)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		nc.Close()
+		return fmt.Errorf("jetstream: %w", err)
+	}
+
+	a.di.nc = nc
+	a.di.js = js
+	a.closer.AddNamed("nats", func(context.Context) error {
+		return nc.Drain()
+	})
+	a.log.Info("nats connected", "url", url)
+	return nil
+}
+
+func (a *App) initKafka(_ context.Context) error {
+	cfg := kafka.LoadConfig()
+	a.di.kafkaProd = kafka.NewProducer(cfg, kafka.TopicPurchasePaid, a.log)
+	a.closer.AddNamed("kafka producer", func(context.Context) error {
+		return a.di.kafkaProd.Close()
+	})
+	a.log.Info("kafka producer ready", "enabled", cfg.Enabled, "topic", kafka.TopicPurchasePaid)
+	return nil
+}
+
+func (a *App) initDomain(_ context.Context) error {
+	a.di.pgRepo = repository.NewPostgresShopRepo(a.di.db)
+
+	billingConn, err := grpc.Dial(a.cfg.BillingConfig().Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("dial billing: %w", err)
+	}
+	a.closer.AddNamed("billing grpc", func(context.Context) error { return billingConn.Close() })
+	billingClient := billingPb.NewBillingServiceClient(billingConn)
+	a.di.billing = billingClient
+
+	var paymentClient paymentPb.PaymentServiceClient
+	if addr := a.cfg.PaymentConfig().Addr(); addr != "" {
+		pconn, perr := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if perr != nil {
+			a.log.Warn("payment dial failed (merch gate degraded)", "err", perr)
+		} else {
+			a.closer.AddNamed("payment grpc", func(context.Context) error { return pconn.Close() })
+			paymentClient = paymentPb.NewPaymentServiceClient(pconn)
+		}
+	}
+
+	subscribeInventorySync(a.di.js, a.di.pgRepo, a.log)
+	subscribePurchaseFulfilled(a.di.js, a.di.pgRepo, a.log)
+
+	a.di.svc = service.New(a.di.pgRepo, a.di.redisRepo, a.di.js, billingClient, paymentClient)
+	a.di.svc.SetKafkaProducer(a.di.kafkaProd)
+	a.di.api = handler.NewShopHandler(a.di.svc)
+	return nil
+}
+
+func subscribeInventorySync(js nats.JetStreamContext, pg *repository.PostgresShopRepo, log *slog.Logger) {
+	if js == nil || pg == nil {
+		return
+	}
+	log.Info("subscribing to inventory.item.created")
+	_, err := js.Subscribe("inventory.item.created", func(msg *nats.Msg) {
+		var event map[string]interface{}
+		if err := json.Unmarshal(msg.Data, &event); err != nil {
+			log.Warn("inventory event parse failed", "err", err)
+			_ = msg.Nak()
+			return
+		}
+		itemID, ok := event["item_id"].(string)
+		if !ok || itemID == "" {
+			log.Warn("inventory event missing item_id", "event", event)
+			_ = msg.Nak()
+			return
+		}
+		name, _ := event["name"].(string)
+		description, _ := event["description"].(string)
+		price, _ := event["price"].(float64)
+		stock := 1
+		switch v := event["stock"].(type) {
+		case float64:
+			stock = int(v)
+		case int:
+			stock = v
+		case int32:
+			stock = int(v)
+		case int64:
+			stock = int(v)
+		}
+		if err := pg.CreateItemFromInventory(context.Background(), itemID, name, description, price, stock); err != nil {
+			log.Warn("create shop item from inventory failed", "item_id", itemID, "err", err)
+			_ = msg.Nak()
+			return
+		}
+		_ = msg.Ack()
+	}, nats.Durable("shop-inventory-sync"))
+	if err != nil {
+		log.Warn("inventory.item.created subscribe failed", "err", err)
+		return
+	}
+	log.Info("subscribed to inventory.item.created")
+}
+
+func subscribePurchaseFulfilled(js nats.JetStreamContext, pg *repository.PostgresShopRepo, log *slog.Logger) {
+	if js == nil || pg == nil {
+		return
+	}
+	log.Info("subscribing to purchase.fulfilled")
+	_, err := js.Subscribe(kafka.TopicPurchaseFulfilled, func(msg *nats.Msg) {
+		fulfilled, err := events.UnmarshalPurchaseFulfilled(msg.Data)
+		if err != nil {
+			log.Warn("purchase.fulfilled parse failed", "err", err)
+			_ = msg.Nak()
+			return
+		}
+		if fulfilled.PurchaseUUID == "" {
+			log.Warn("purchase.fulfilled missing purchase_uuid")
+			_ = msg.Nak()
+			return
+		}
+		if err := pg.MarkPurchaseFulfilled(context.Background(), fulfilled.PurchaseUUID); err != nil {
+			log.Warn("mark purchase fulfilled failed", "purchase_id", fulfilled.PurchaseUUID, "err", err)
+			_ = msg.Nak()
+			return
+		}
+		_ = msg.Ack()
+	}, nats.Durable("shop-purchase-fulfilled"))
+	if err != nil {
+		log.Warn("purchase.fulfilled subscribe failed", "err", err)
+		return
+	}
+	log.Info("subscribed to purchase.fulfilled")
+}
+
+func (a *App) initOutbox(_ context.Context) error {
+	outboxCtx, cancelOutbox := context.WithCancel(context.Background())
+	outboxWorker := worker.NewOutboxWorker(a.di.db, a.di.js, func(ctx context.Context, payload []byte) error {
+		if a.di.billing == nil {
+			return fmt.Errorf("billing client missing")
+		}
+		var body struct {
+			UserID      string `json:"user_id"`
+			Amount      int    `json:"amount"`
+			ReferenceID string `json:"reference_id"`
+		}
+		if err := json.Unmarshal(payload, &body); err != nil {
+			return err
+		}
+		_, err := a.di.billing.AddCurrency(ctx, &billingPb.AddCurrencyRequest{
+			UserId:      body.UserID,
+			Currency:    billingPb.CurrencyType_TICKETS,
+			Amount:      int32(body.Amount),
+			Reason:      "shop_purchase_refund",
+			ReferenceId: body.ReferenceID,
+		})
+		return err
+	})
+	go outboxWorker.Start(outboxCtx)
+	a.closer.AddNamed("outbox worker", func(context.Context) error {
+		cancelOutbox()
+		return nil
+	})
+	a.log.Info("outbox worker started")
+	return nil
+}
+
+func (a *App) initGRPC(_ context.Context) error {
+	lis, err := net.Listen("tcp", ":"+a.cfg.GRPCConfig().Port())
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	a.listener = lis
+	a.closer.AddNamed("tcp listener", func(context.Context) error {
+		return lis.Close()
+	})
+
+	grpcServer := grpc.NewServer(
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.ChainUnaryInterceptor(
+			interceptor.Recovery(),
+			interceptor.Logger(),
+			interceptor.Validate(),
+			metrics.UnaryServerInterceptor("shop"),
+		),
+	)
+	pb.RegisterShopServiceServer(grpcServer, a.di.api)
+	reflection.Register(grpcServer)
+
+	a.grpcServer = grpcServer
+	metrics.SetHealthy("shop")
+	a.closer.AddNamed("grpc server", func(context.Context) error {
+		grpcServer.GracefulStop()
+		return nil
+	})
+	return nil
+}
+
+func (a *App) initMetricsHTTP(_ context.Context) error {
+	db := a.di.db
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "shop"})
+	})
+	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if err := db.Ping(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "degraded", "reason": "postgres unreachable"})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready", "service": "shop"})
+	})
+
+	srv := &http.Server{Addr: ":" + a.cfg.MetricsConfig().Port(), Handler: mux}
+	a.metricsServer = srv
+	go func() {
+		a.log.Info("metrics/health listening", "addr", srv.Addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			a.log.Error("metrics server error", "err", err)
+		}
+	}()
+	a.closer.AddNamed("metrics http", func(ctx context.Context) error {
+		return srv.Shutdown(ctx)
+	})
+	return nil
+}
+
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}

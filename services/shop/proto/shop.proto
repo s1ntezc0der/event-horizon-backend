@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+package shop;
+
+option go_package = "github.com/s1ntezc0der/event-horizon-backend/services/shop/proto;shop";
+
+import "validate/validate.proto";
+
+service ShopService {
+    rpc GetItems(GetItemsRequest) returns (GetItemsResponse);
+    rpc PurchaseItem(PurchaseItemRequest) returns (PurchaseItemResponse);
+    rpc CancelPurchase(CancelPurchaseRequest) returns (CancelPurchaseResponse);
+    rpc GetInventory(GetInventoryRequest) returns (GetInventoryResponse);
+    rpc ListPurchasesByItemIDs(ListPurchasesByItemIDsRequest) returns (ListPurchasesByItemIDsResponse);
+}
+
+message Item {
+    string id = 1;
+    string name = 2;
+    string description = 3;
+    int32 price = 4;
+    string category = 5;
+    string game_id = 6;
+    string image_url = 7;
+    bool available = 8;
+    bool owned = 9;
+    string purchased_at = 10;
+    // Price paid at purchase time (inventory list); 0 if unknown.
+    int32 purchase_price = 11;
+    string purchase_id = 12;
+    // Refund window (ISO-8601); inventory list only.
+    string refundable_until = 13;
+    string fulfilled_at = 14;
+    bool can_cancel = 15;
+}
+
+message GetItemsRequest {
+    string category = 1 [(validate.rules).string = {max_len: 32}];
+    string game_id = 2 [(validate.rules).string = {max_len: 32}];
+    string user_id = 3 [(validate.rules).string = {max_len: 64}];
+}
+
+message GetItemsResponse {
+    repeated Item items = 1;
+}
+
+message PurchaseItemRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    string item_id = 2 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message PurchaseItemResponse {
+    bool success = 1;
+    string message = 2;
+    int32 new_balance = 3;
+}
+
+message CancelPurchaseRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    // Catalog / shop item id (same id used at purchase).
+    string item_id = 2 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message CancelPurchaseResponse {
+    bool success = 1;
+    string message = 2;
+    int32 new_balance = 3;
+    int32 refunded_amount = 4;
+    bool already_refunded = 5;
+}
+
+message GetInventoryRequest {
+    string user_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message GetInventoryResponse {
+    repeated Item items = 1;
+}
+
+message ListPurchasesByItemIDsRequest {
+    repeated string item_ids = 1 [(validate.rules).repeated = {min_items: 1, max_items: 500}];
+    int32 limit = 2 [(validate.rules).int32 = {gte: 0, lte: 200}];
+    int32 offset = 3 [(validate.rules).int32 = {gte: 0}];
+}
+
+message PurchaseRow {
+    string id = 1;
+    string user_id = 2; // buyer
+    string item_id = 3;
+    int32 price = 4;
+    string status = 5;
+    string purchased_at = 6;
+    string refunded_at = 7;
+}
+
+message ListPurchasesByItemIDsResponse {
+    repeated PurchaseRow purchases = 1;
+    int64 total = 2;
+    int64 sales_count = 3;       // COMPLETED not refunded
+    int64 tickets_earned = 4;    // sum price of non-refunded COMPLETED
+}

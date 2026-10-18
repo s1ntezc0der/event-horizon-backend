@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package inventory;
+
+option go_package = "github.com/s1ntezc0der/event-horizon-backend/services/inventory/proto;inventory";
+
+import "google/protobuf/struct.proto";
+import "validate/validate.proto";
+
+service InventoryService {
+    rpc CreateItem(CreateItemRequest) returns (ItemResponse);
+    rpc GetItem(GetItemRequest) returns (ItemResponse);
+    rpc UpdateItem(UpdateItemRequest) returns (ItemResponse);
+    rpc DeleteItem(DeleteItemRequest) returns (EmptyResponse);
+    rpc SearchItems(SearchItemsRequest) returns (SearchItemsResponse);
+    rpc GetByAuthor(GetByAuthorRequest) returns (SearchItemsResponse);
+    rpc GetByType(GetByTypeRequest) returns (SearchItemsResponse);
+    rpc BulkCreateItems(BulkCreateItemsRequest) returns (BulkCreateItemsResponse);
+    rpc ReserveItem(ReserveItemRequest) returns (ReserveItemResponse);
+    rpc ReleaseItem(ReleaseItemRequest) returns (ReleaseItemResponse);
+    rpc SoftDeleteItem(SoftDeleteItemRequest) returns (EmptyResponse);
+    rpc RestoreItem(RestoreItemRequest) returns (EmptyResponse);
+    rpc GetStats(EmptyRequest) returns (StatsResponse);
+}
+
+message Item {
+    string id = 1;
+    string author_id = 2;
+    string type = 3;
+    string name = 4;
+    string description = 5;
+    double price = 6;
+    int32 stock = 7;
+    google.protobuf.Struct attributes = 8;
+    repeated string images = 9;
+    string created_at = 10;
+    string updated_at = 11;
+    int32 version = 12; // optimistic lock
+}
+
+message CreateItemRequest {
+    string author_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    string type = 2 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    string name = 3 [(validate.rules).string = {min_len: 1, max_len: 200}];
+    string description = 4 [(validate.rules).string = {max_len: 2000}];
+    double price = 5 [(validate.rules).double = {gte: 0}];
+    int32 stock = 6 [(validate.rules).int32 = {gte: 0}];
+    google.protobuf.Struct attributes = 7;
+    repeated string images = 8 [(validate.rules).repeated = {max_items: 20}];
+}
+
+message GetItemRequest {
+    string id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message UpdateItemRequest {
+    string id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    string author_id = 2 [(validate.rules).string = {max_len: 64}];
+    string type = 3 [(validate.rules).string = {max_len: 64}];
+    string name = 4 [(validate.rules).string = {max_len: 200}];
+    string description = 5 [(validate.rules).string = {max_len: 2000}];
+    double price = 6 [(validate.rules).double = {gte: 0}];
+    int32 stock = 7 [(validate.rules).int32 = {gte: 0}];
+    google.protobuf.Struct attributes = 8;
+    repeated string images = 9 [(validate.rules).repeated = {max_items: 20}];
+    int32 version = 10; // expected version; 0 = load current in service
+}
+
+message DeleteItemRequest {
+    string id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message SearchItemsRequest {
+    map<string, string> filters = 1;
+    int32 limit = 2 [(validate.rules).int32 = {gte: 0, lte: 100}];
+    int32 offset = 3 [(validate.rules).int32 = {gte: 0}];
+}
+
+message GetByAuthorRequest {
+    string author_id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    int32 limit = 2 [(validate.rules).int32 = {gte: 0, lte: 100}];
+    int32 offset = 3 [(validate.rules).int32 = {gte: 0}];
+}
+
+message GetByTypeRequest {
+    string type = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    int32 limit = 2 [(validate.rules).int32 = {gte: 0, lte: 100}];
+    int32 offset = 3 [(validate.rules).int32 = {gte: 0}];
+}
+
+message ItemResponse {
+    Item item = 1;
+}
+
+message SearchItemsResponse {
+    repeated Item items = 1;
+    int64 total = 2;
+}
+
+message EmptyResponse {}
+
+message BulkCreateItemsRequest {
+    repeated CreateItemRequest items = 1 [(validate.rules).repeated = {min_items: 1, max_items: 100}];
+}
+
+message BulkCreateItemsResponse {
+    bool success = 1;
+    int32 count = 2;
+}
+
+message ReserveItemRequest {
+    string id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    int32 quantity = 2 [(validate.rules).int32 = {gt: 0}];
+}
+
+message ReserveItemResponse {
+    bool success = 1;
+    int32 remaining_stock = 2;
+}
+
+message ReleaseItemRequest {
+    string id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+    int32 quantity = 2 [(validate.rules).int32 = {gt: 0}];
+}
+
+message ReleaseItemResponse {
+    bool success = 1;
+    int32 remaining_stock = 2;
+}
+
+message SoftDeleteItemRequest {
+    string id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message RestoreItemRequest {
+    string id = 1 [(validate.rules).string = {min_len: 1, max_len: 64}];
+}
+
+message EmptyRequest {}
+
+message TopItem {
+    string id = 1;
+    string name = 2;
+    double price = 3;
+    string author_id = 4;
+}
+
+message StatsResponse {
+    int64 total_items = 1;
+    map<string, int64> by_type = 2;
+    map<string, int64> by_author = 3;
+    int64 total_stock = 4;
+    repeated TopItem top_expensive = 5;
+}
